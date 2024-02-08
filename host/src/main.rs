@@ -7,13 +7,11 @@ use std::time::Duration;
 
 fn handle_client(mut stream: TcpStream) -> io::Result<File> {
     let buf: &mut [u8; 100] = &mut [0; 100];
-    let mut file = File::create("foo")?;
     loop {
         let result = stream.read(buf);
         match result {
             Ok(len) => {
                 let str = String::from_utf8(buf[0..len].to_vec());
-                file.write_all(&buf[0..len])?;
 
                 println!("wrote: {:?}", str);
             }
