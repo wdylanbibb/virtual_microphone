@@ -23,7 +23,7 @@ fn handle_client(mut stream: TcpStream) -> io::Result<File> {
     }
 }
 fn main() {
-    let listener = TcpListener::bind("127.0.0.1:34234").unwrap();
+    let listener = TcpListener::bind("0.0.0.0:34234").unwrap();
 
     for stream in listener.incoming() {
         match stream {
