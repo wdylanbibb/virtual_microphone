@@ -11,9 +11,11 @@ fn handle_client(mut stream: TcpStream) -> io::Result<File> {
         let result = stream.read(buf);
         match result {
             Ok(len) => {
-                let str = String::from_utf8(buf[0..len].to_vec());
+                if len > 0 {
+                    let str = String::from_utf8(buf[0..len].to_vec());
 
-                println!("wrote: {:?}", str);
+                    println!("wrote: {:?}", str);
+                }
             }
             Err(e) => {
                 println!("error parsing header: {:?}", e);
