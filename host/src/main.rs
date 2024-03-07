@@ -1,19 +1,16 @@
-use std::{
-    io::Write,
-    net::{Ipv4Addr, TcpStream},
-    sync::mpsc::channel,
-};
+use std::{io::Write, net::TcpStream};
 
 use clap::Parser;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use local_ip_address::local_ip;
-use pnet::datalink;
 use ringbuf::HeapRb;
-use threadpool::ThreadPool;
 
 #[derive(Parser, Debug)]
 #[command(version, about = "CPAL feedback example", long_about = None)]
 struct Opt {
+    /// The IP address to connect to
+    #[arg(short = 'a', long, value_name = "IP", default_value_t = local_ip_address::local_ip().unwrap().to_string())]
+    ip_address: String,
+
     /// The input device to use
     #[arg(short, long, value_name = "IN", default_value_t = String::from("default"))]
     input_device: String,
@@ -47,6 +44,8 @@ fn err_fn(err: cpal::StreamError) {
 
 fn main() -> anyhow::Result<()> {
     let opt = Opt::parse();
+
+    println!("{}", opt.ip_address);
 
     // Conditionally compile with jack if the feature is specified
     #[cfg(all(
@@ -91,92 +90,56 @@ fn main() -> anyhow::Result<()> {
     let latency_frames = (opt.latency / 1_000.0) * config.sample_rate.0 as f32;
     let latency_samples = latency_frames as usize * config.channels as usize;
 
-    let local_ip = local_ip().unwrap();
-    println!("{}", local_ip);
-    let prefix = 32 - {
-        let mut prefix = None;
-        for iface in datalink::interfaces() {
-            for ip in iface.ips {
-                match ip {
-                    pnet::ipnetwork::IpNetwork::V4(i) => {
-                        if i.ip() == local_ip {
-                            prefix = Some(i.prefix());
-                        }
+    match TcpStream::connect((opt.ip_address, 34234)) {
+        Ok(mut client) => {
+            println!("{:?}", client);
+
+            let ring = HeapRb::<f32>::new(latency_samples * 2);
+            let (mut producer, mut consumer) = ring.split();
+
+            for _ in 0..latency_samples {
+                producer.push(0.0).unwrap();
+            }
+
+            let input_data_fn = move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                let mut output_fell_behind = false;
+                for &sample in data {
+                    if producer.push(sample).is_err() {
+                        output_fell_behind = true;
                     }
-                    pnet::ipnetwork::IpNetwork::V6(_) => {}
                 }
-            }
-        }
-        prefix
-    }
-    .unwrap();
-
-    let pool = ThreadPool::new(256);
-
-    let (tx, rx) = channel();
-    match local_ip {
-        std::net::IpAddr::V4(ip) => {
-            let ip: u32 = u32::from_be_bytes(ip.octets()) & (u32::MAX << prefix);
-            for i in 0..2u32.pow(prefix.into()) {
-                let tx = tx.clone();
-                pool.execute(move || {
-                    let test_ip = Ipv4Addr::from((ip + i).to_be_bytes());
-                    if let Ok(c) = TcpStream::connect((test_ip, 34234)) {
-                        tx.send(c)
-                            .expect("channel will be there waiting for the pool");
-                    };
-                })
-            }
-        }
-        std::net::IpAddr::V6(_) => (),
-    }
-
-    for mut client in rx.iter() {
-        println!("{:?}", client);
-
-        let ring = HeapRb::<f32>::new(latency_samples * 2);
-        let (mut producer, mut consumer) = ring.split();
-
-        for _ in 0..latency_samples {
-            producer.push(0.0).unwrap();
-        }
-
-        let input_data_fn = move |data: &[f32], _: &cpal::InputCallbackInfo| {
-            let mut output_fell_behind = false;
-            for &sample in data {
-                if producer.push(sample).is_err() {
-                    output_fell_behind = true;
+                if output_fell_behind {
+                    eprintln!("output stream fell behind: try increasing latency");
                 }
-            }
-            if output_fell_behind {
-                eprintln!("output stream fell behind: try increasing latency");
-            }
-        };
+            };
 
-        // Build streams.
-        println!(
-            "Attempting to build input stream with f32 samples and `{:?}`",
-            config
-        );
-        let input_stream = input_device.build_input_stream(&config, input_data_fn, err_fn, None)?;
-        println!("Successfully built stream");
+            // Build streams.
+            println!(
+                "Attempting to build input stream with f32 samples and `{:?}`",
+                config
+            );
+            let input_stream =
+                input_device.build_input_stream(&config, input_data_fn, err_fn, None)?;
+            println!("Successfully built stream");
 
-        // Play the streams.
-        println!(
-            "Starting the input streams with `{}` milliseconds of latency.",
-            opt.latency
-        );
-        input_stream.play()?;
+            // Play the streams.
+            println!(
+                "Starting the input streams with `{}` milliseconds of latency.",
+                opt.latency
+            );
+            input_stream.play()?;
 
-        std::thread::spawn(move || loop {
-            if let Some(num) = consumer.pop() {
-                if let Err(e) = client.write(&num.to_be_bytes()) {
-                    eprintln!("{e}");
+            std::thread::spawn(move || loop {
+                if let Some(num) = consumer.pop() {
+                    if let Err(e) = client.write(&num.to_be_bytes()) {
+                        eprintln!("{e}");
+                    }
                 }
-            }
-        });
+            });
 
-        std::thread::sleep(std::time::Duration::from_secs(60));
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
+        Err(e) => eprintln!("{e}"),
     }
 
     Ok(())
