@@ -87,6 +87,10 @@ fn main() -> anyhow::Result<()> {
     // We'll try to keep the same configuration between streams to keep it simple.
     let config: cpal::StreamConfig = input_device.default_input_config()?.into();
 
+    // Create a delay in case the input and output devices aren't synced
+    let latency_frames = (opt.latency / 1_000.0) * config.sample_rate.0 as f32;
+    let latency_samples = latency_frames as usize * config.channels as usize;
+
     let local_ip = local_ip().unwrap();
     println!("{}", local_ip);
     let prefix = 32 - {
@@ -129,16 +133,24 @@ fn main() -> anyhow::Result<()> {
 
     for mut client in rx.iter() {
         println!("{:?}", client);
+
+        let ring = HeapRb::<f32>::new(latency_samples * 2);
+        let (mut producer, mut consumer) = ring.split();
+
+        for _ in 0..latency_samples {
+            producer.push(0.0).unwrap();
+        }
+
         let input_data_fn = move |data: &[f32], _: &cpal::InputCallbackInfo| {
-            // let mut output_fell_behind = false;
+            let mut output_fell_behind = false;
             for &sample in data {
-                if let Err(e) = client.write(&sample.to_be_bytes()) {
-                    eprintln!("{e}");
+                if producer.push(sample).is_err() {
+                    output_fell_behind = true;
                 }
             }
-            // if output_fell_behind {
-            //     eprintln!("output stream fell behind: try increasing latency");
-            // }
+            if output_fell_behind {
+                eprintln!("output stream fell behind: try increasing latency");
+            }
         };
 
         // Build streams.
@@ -155,6 +167,14 @@ fn main() -> anyhow::Result<()> {
             opt.latency
         );
         input_stream.play()?;
+
+        std::thread::spawn(move || loop {
+            if let Some(num) = consumer.pop() {
+                if let Err(e) = client.write(&num.to_be_bytes()) {
+                    eprintln!("{e}");
+                }
+            }
+        });
 
         std::thread::sleep(std::time::Duration::from_secs(60));
     }
