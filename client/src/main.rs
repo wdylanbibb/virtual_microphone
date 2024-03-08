@@ -1,9 +1,5 @@
-use std::io::{self, Read};
-use std::{
-    fs::File,
-    net::{TcpListener, TcpStream},
-    thread,
-};
+use std::io::Read;
+use std::net::TcpListener;
 
 use clap::Parser;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -41,26 +37,6 @@ struct Opt {
 
 fn err_fn(err: cpal::StreamError) {
     eprintln!("an error occurred on stream: {}", err);
-}
-
-fn handle_client(mut stream: TcpStream) -> io::Result<File> {
-    let buf: &mut [u8; 4] = &mut [0; 4];
-    loop {
-        let result = stream.read(buf);
-        match result {
-            Ok(len) => {
-                if len > 0 {
-                    let str = f32::from_be_bytes(*buf);
-
-                    println!("wrote: {:?}", str);
-                }
-            }
-            Err(e) => {
-                println!("error parsing header: {:?}", e);
-                return Err(e);
-            }
-        }
-    }
 }
 
 fn main() -> anyhow::Result<()> {
