@@ -1,5 +1,4 @@
-use std::io::Read;
-use std::net::TcpListener;
+use std::net::UdpSocket;
 
 use clap::Parser;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -93,86 +92,68 @@ fn main() -> anyhow::Result<()> {
     let latency_frames = (opt.latency / 1_000.0) * config.sample_rate.0 as f32;
     let latency_samples = latency_frames as usize * config.channels as usize;
 
-    // Run for 3 seconds before closing.
-    // println!("Playing for 3 seconds...");
-    // std::thread::sleep(std::time::Duration::from_secs(3));
-    // drop(input_stream);
-    // drop(output_stream);
-    // println!("Done!");
+    // The buffer to share samples
+    println!("{latency_samples}");
+    // let ring = HeapRb::<f32>::new(latency_samples * 2);
+    let ring = HeapRb::<f32>::new(13230 * 2);
+    let (mut producer, mut consumer) = ring.split();
 
-    let listener = TcpListener::bind("0.0.0.0:34234").unwrap();
+    // Fill the samples with 0.0 equal to the length of the delay.
+    for _ in 0..latency_samples {
+        // The ring buffer has twice as much space as necessary to add latency here,
+        // so this should never fail
+        producer.push(0.0).unwrap();
+    }
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(mut stream) => {
-                // Connection successful
-                // The buffer to share samples
-                let ring = HeapRb::<f32>::new(latency_samples * 2);
-                let (mut producer, mut consumer) = ring.split();
-
-                // Fill the samples with 0.0 equal to the length of the delay.
-                for _ in 0..latency_samples {
-                    // The ring buffer has twice as much space as necessary to add latency here,
-                    // so this should never fail
-                    producer.push(0.0).unwrap();
+    let output_data_fn = move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+        let mut input_fell_behind = false;
+        for sample in data {
+            *sample = match consumer.pop() {
+                Some(s) => s,
+                None => {
+                    input_fell_behind = true;
+                    0.0
                 }
+            };
+        }
+        if input_fell_behind {
+            eprintln!("input stream fell behind: try increasing latency");
+        }
+    };
 
-                let output_data_fn = move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    let mut input_fell_behind = false;
-                    for sample in data {
-                        *sample = match consumer.pop() {
-                            Some(s) => s,
-                            None => {
-                                input_fell_behind = true;
-                                0.0
-                            }
-                        };
-                    }
-                    if input_fell_behind {
-                        eprintln!("input stream fell behind: try increasing latency");
-                    }
-                };
+    // Build streams.
+    println!(
+        "Attempting to build stream with f32 sample and `{:?}`",
+        config
+    );
+    let output_stream = output_device.build_output_stream(&config, output_data_fn, err_fn, None)?;
+    println!("Successfully built streams");
 
-                // Build streams.
-                println!(
-                    "Attempting to build stream with f32 sample and `{:?}`",
-                    config
-                );
-                let output_stream =
-                    output_device.build_output_stream(&config, output_data_fn, err_fn, None)?;
-                println!("Successfully built streams");
+    // Play the streams.
+    println!(
+        "Starting the output stream with `{}` milliseconds of latency.",
+        opt.latency
+    );
+    output_stream.play()?;
 
-                // Play the streams.
-                println!(
-                    "Starting the output stream with `{}` milliseconds of latency.",
-                    opt.latency
-                );
-                output_stream.play()?;
+    let socket = UdpSocket::bind("0.0.0.0:34234").unwrap();
 
-                // handle_client(stream).unwrap();
-                let buf: &mut [u8; 4] = &mut [0; 4];
-                loop {
-                    let result = stream.read(buf);
-                    match result {
-                        Ok(len) => {
-                            if len > 0 {
-                                let str = f32::from_be_bytes(*buf);
+    let buf: &mut [u8; 4] = &mut [0; 4];
+    loop {
+        match socket.recv_from(buf) {
+            Ok((len, _)) => {
+                if len > 0 {
+                    let num = f32::from_be_bytes(*buf);
 
-                                println!("wrote: {:?}", str);
-                                if let Err(e) = producer.push(str) {
-                                    eprintln!("{e}");
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            println!("error parsing header: {:?}", e);
-                        }
+                    // println!("wrote: {:?}", num);
+                    if let Err(e) = producer.push(num) {
+                        eprintln!("{e}");
                     }
                 }
             }
-            Err(_) => { /* connection failed */ }
+            Err(e) => {
+                println!("error parsing header: {:?}", e);
+            }
         }
     }
-
-    Ok(())
 }
