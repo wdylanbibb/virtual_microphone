@@ -67,14 +67,6 @@ fn main() -> anyhow::Result<()> {
     let host = cpal::default_host();
 
     // Find devices.
-    let input_device = if opt.input_device == "default" {
-        host.default_input_device()
-    } else {
-        host.input_devices()?
-            .find(|x| x.name().map(|y| y == opt.input_device).unwrap_or(false))
-    }
-    .expect("failed to find input device");
-
     let output_device = if opt.output_device == "default" {
         host.default_output_device()
     } else {
@@ -86,16 +78,19 @@ fn main() -> anyhow::Result<()> {
     println!("Using output device: \"{}\"", output_device.name()?);
 
     // We'll try to keep the same configuration between streams to keep it simple.
-    let config: cpal::StreamConfig = input_device.default_input_config()?.into();
+    // let config: cpal::StreamConfig = output_device.default_output_config()?.into();
+    let config = cpal::StreamConfig {
+        channels: 1,
+        sample_rate: cpal::SampleRate(16000),
+        buffer_size: cpal::BufferSize::Default,
+    };
 
     // Create a delay in case the input and output devices aren't synced.
     let latency_frames = (opt.latency / 1_000.0) * config.sample_rate.0 as f32;
     let latency_samples = latency_frames as usize * config.channels as usize;
 
     // The buffer to share samples
-    println!("{latency_samples}");
-    // let ring = HeapRb::<f32>::new(latency_samples * 2);
-    let ring = HeapRb::<f32>::new(13230 * 2);
+    let ring = HeapRb::<f32>::new(latency_samples * 2);
     let (mut producer, mut consumer) = ring.split();
 
     // Fill the samples with 0.0 equal to the length of the delay.
@@ -117,7 +112,7 @@ fn main() -> anyhow::Result<()> {
             };
         }
         if input_fell_behind {
-            eprintln!("input stream fell behind: try increasing latency");
+            // eprintln!("input stream fell behind: try increasing latency");
         }
     };
 

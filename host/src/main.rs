@@ -1,4 +1,4 @@
-use std::{io::Write, net::TcpStream};
+use std::net::UdpSocket;
 
 use clap::Parser;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -85,62 +85,67 @@ fn main() -> anyhow::Result<()> {
 
     // We'll try to keep the same configuration between streams to keep it simple.
     let config: cpal::StreamConfig = input_device.default_input_config()?.into();
+    // let config = cpal::StreamConfig {
+    //     channels: 2,
+    //     sample_rate: cpal::SampleRate(44100),
+    //     buffer_size: cpal::BufferSize::Default,
+    // };
 
     // Create a delay in case the input and output devices aren't synced
     let latency_frames = (opt.latency / 1_000.0) * config.sample_rate.0 as f32;
     let latency_samples = latency_frames as usize * config.channels as usize;
 
-    match TcpStream::connect((opt.ip_address, 34234)) {
-        Ok(mut client) => {
-            println!("{:?}", client);
+    let socket = UdpSocket::bind("0.0.0.0:0")?;
+    socket.connect(opt.ip_address + ":34234")?;
 
-            let ring = HeapRb::<f32>::new(latency_samples * 2);
-            let (mut producer, mut consumer) = ring.split();
+    println!("{:?}", socket);
 
-            for _ in 0..latency_samples {
-                producer.push(0.0).unwrap();
-            }
+    let ring = HeapRb::<f32>::new(latency_samples * 2);
+    let (mut producer, mut consumer) = ring.split();
 
-            let input_data_fn = move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                let mut output_fell_behind = false;
-                for &sample in data {
-                    if producer.push(sample).is_err() {
-                        output_fell_behind = true;
-                    }
-                }
-                if output_fell_behind {
-                    eprintln!("output stream fell behind: try increasing latency");
-                }
-            };
-
-            // Build streams.
-            println!(
-                "Attempting to build input stream with f32 samples and `{:?}`",
-                config
-            );
-            let input_stream =
-                input_device.build_input_stream(&config, input_data_fn, err_fn, None)?;
-            println!("Successfully built stream");
-
-            // Play the streams.
-            println!(
-                "Starting the input streams with `{}` milliseconds of latency.",
-                opt.latency
-            );
-            input_stream.play()?;
-
-            std::thread::spawn(move || loop {
-                if let Some(num) = consumer.pop() {
-                    if let Err(e) = client.write(&num.to_be_bytes()) {
-                        eprintln!("{e}");
-                    }
-                }
-            });
-
-            std::thread::sleep(std::time::Duration::from_secs(60));
-        }
-        Err(e) => eprintln!("{e}"),
+    for _ in 0..latency_samples {
+        producer.push(0.0).unwrap();
     }
+
+    let input_data_fn = move |data: &[f32], _: &cpal::InputCallbackInfo| {
+        let mut output_fell_behind = false;
+        for &sample in data {
+            if producer.push(sample).is_err() {
+                output_fell_behind = true;
+            }
+            // if let Err(e) = socket.send(&sample.to_be_bytes()) {
+            //     eprintln!("{e}");
+            // }
+        }
+        if output_fell_behind {
+            eprintln!("output stream fell behind: try increasing latency");
+        }
+    };
+
+    // Build streams.
+    println!(
+        "Attempting to build input stream with f32 samples and `{:?}`",
+        config
+    );
+    let input_stream = input_device.build_input_stream(&config, input_data_fn, err_fn, None)?;
+    println!("Successfully built stream");
+
+    // Play the streams.
+    println!(
+        "Starting the input streams with `{}` milliseconds of latency.",
+        opt.latency
+    );
+    input_stream.play()?;
+
+    std::thread::spawn(move || loop {
+        if let Some(num) = consumer.pop() {
+            if let Err(e) = socket.send(&num.to_be_bytes()) {
+                eprintln!("{e}");
+            }
+        }
+    });
+
+    std::thread::sleep(std::time::Duration::from_secs(60));
 
     Ok(())
 }
